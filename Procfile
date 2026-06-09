@@ -1,1 +1,1 @@
-worker: python telegram_quiz_bot1.py
+worker: python telegram_quiz_bot-1.py
