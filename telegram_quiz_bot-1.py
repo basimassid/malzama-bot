@@ -31,9 +31,21 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 TIME_LIMIT = int(os.environ.get("TIME_LIMIT", "30"))     # ثوانٍ لكل سؤال (5..600)
 TIME_LIMIT = max(5, min(TIME_LIMIT, 600))
+ADMIN_ID = os.getenv("ADMIN_ID", "").strip()     # معرّف المدير لاستقبال الإشعارات (اختياري)
 LEADERBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "leaderboard.json")
 TOP_N = 10
+
+
+async def notify_admin(context, text: str) -> None:
+    """يرسل إشعارًا للمدير إن كان ADMIN_ID مضبوطًا (مع تجاهل أي خطأ)."""
+    if not ADMIN_ID:
+        return
+    try:
+        chat = int(ADMIN_ID) if ADMIN_ID.lstrip("-").isdigit() else ADMIN_ID
+        await context.bot.send_message(chat_id=chat, text=text)
+    except Exception as e:
+        logging.warning("تعذّر إرسال إشعار المدير: %s", e)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -275,6 +287,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = update.message or update.callback_query.message
     await target.reply_text(text, reply_markup=main_menu(), parse_mode=ParseMode.HTML)
 
+    # إشعار المدير ببدء الطالب (فقط عند أمر /start أو /quiz الفعلي)
+    if update.message:
+        u = update.effective_user
+        who = u.first_name or "طالب"
+        if u.username:
+            who += f" (@{u.username})"
+        await notify_admin(context, f"🔔 بدأ الطالب {who} الاختبار الآن.")
+
 
 def build_quiz(section: str):
     if section == "all":
@@ -393,6 +413,13 @@ async def finish(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
         f"{emoji} <b>انتهى الاختبار</b>\n\n"
         f"نتيجتك: <b>{score} / {total}</b>  ({pct}%)\n{note}{record_line}",
         reply_markup=kb, parse_mode=ParseMode.HTML)
+
+    # إشعار المدير بانتهاء الطالب ونتيجته
+    await notify_admin(
+        context,
+        f"✅ أنهى الطالب {ud.get('name', 'طالب')} الاختبار. "
+        f"النتيجة: {score} من {total}.")
+
     for k in ("quiz", "idx", "score", "cur_done", "timer_task",
               "poll_id", "cur_idx", "section"):
         ud.pop(k, None)
@@ -404,38 +431,4 @@ async def show_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     text = board_text(board, highlight_uid=uid)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ القائمة", callback_data="home")]])
     if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text, reply_markup=kb,
-                                                       parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-async def on_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.callback_query.answer()
-    await start(update, context)
-
-
-async def on_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.callback_query.answer()
-    await start(update, context)
-
-
-def main() -> None:
-    if BOT_TOKEN == "ضع_توكن_البوت_هنا":
-        raise SystemExit("⚠️ ضع توكن البوت في BOT_TOKEN أو في متغيّر البيئة قبل التشغيل.")
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.bot_data["board"] = load_board()
-    app.add_handler(CommandHandler(["start", "quiz"], start))
-    app.add_handler(CommandHandler("leaderboard", show_board))
-    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^m\|"))
-    app.add_handler(CallbackQueryHandler(show_board, pattern=r"^board$"))
-    app.add_handler(CallbackQueryHandler(on_restart, pattern=r"^restart$"))
-    app.add_handler(CallbackQueryHandler(on_home, pattern=r"^home$"))
-    app.add_handler(PollAnswerHandler(on_poll_answer))
-    print(f"✅ البوت يعمل الآن (استفتاء كويز، ⏱️ {TIME_LIMIT}ث/سؤال)... Ctrl+C للإيقاف.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+   
