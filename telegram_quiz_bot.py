@@ -1,0 +1,468 @@
+# -*- coding: utf-8 -*-
+"""
+بوت اختبار «ملزمة اللغة العربية» — إعداد الطالب باسم عصيد كمر  (نسخة مطوّرة)
+==========================================================================
+المزايا:
+  • بنك أسئلة موسّع (٥٠ سؤالًا) على أقسام الملزمة: القرآن، الأدب، القواعد، الإملاء.
+  • ⏱️ مؤقّت لكل سؤال (افتراضيًّا ٣٠ ثانية) — وانتهاء الوقت يُحتسب إجابةً فائتة.
+  • 🏆 لوحة صدارة لأفضل النتائج بين الزملاء (تُحفظ في ملف وتبقى بعد إعادة التشغيل).
+
+المتطلبات:
+    pip install "python-telegram-bot>=20"
+
+التشغيل:
+    1) أنشئ بوتًا عبر @BotFather واحصل على التوكن.
+    2) export BOT_TOKEN="..."          (أو عدّل القيمة في الأسفل)
+       export TIME_LIMIT="30"          (اختياري: مدة السؤال بالثواني)
+    3) python telegram_quiz_bot.py
+"""
+
+import os
+import json
+import random
+import asyncio
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+# ====== الإعدادات ======
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
+TIME_LIMIT = int(os.environ.get("TIME_LIMIT", "30"))          # ثوانٍ لكل سؤال
+LEADERBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "leaderboard.json")
+TOP_N = 10                                                    # عدد المعروضين في الصدارة
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+# ============================================================
+#                       بنك الأسئلة (٥٠)
+#   كل سؤال: q النص، opts الخيارات، ans رقم الصحيح (0-based)، exp الشرح
+# ============================================================
+QUESTIONS = {
+    "quran": [
+        {"q": "«وَالْقُرْآنِ الْحَكِيمِ» — في أي سورة وردت؟",
+         "opts": ["سورة يوسف", "سورة يس", "سورة النحل", "سورة طه"], "ans": 1,
+         "exp": "من مطلع سورة يس (الآية ٢)."},
+        {"q": "السورة التي بُدئت آياتها بـ«الر تِلْكَ آيَاتُ الْكِتَابِ الْمُبِينِ»؟",
+         "opts": ["يس", "الكهف", "يوسف", "الرعد"], "ans": 2, "exp": "مطلع سورة يوسف."},
+        {"q": "أكمل: «إِنَّكَ لَمِنَ الْمُرْسَلِينَ ۝ عَلَىٰ صِرَاطٍ ...»",
+         "opts": ["قَوِيمٍ", "مُّسْتَقِيمٍ", "عَظِيمٍ", "كَرِيمٍ"], "ans": 1,
+         "exp": "«عَلَىٰ صِرَاطٍ مُّسْتَقِيمٍ» (يس: ٤)."},
+        {"q": "كم كوكبًا رأى يوسف عليه السلام في رؤياه؟",
+         "opts": ["تسعة", "عشرة", "أحد عشر", "اثنا عشر"], "ans": 2,
+         "exp": "«أَحَدَ عَشَرَ كَوْكَبًا وَالشَّمْسَ وَالْقَمَرَ»."},
+        {"q": "أكمل: «نَحْنُ نَقُصُّ عَلَيْكَ أَحْسَنَ ...»",
+         "opts": ["الْحَدِيثِ", "الْقَصَصِ", "الْكَلَامِ", "الْبَيَانِ"], "ans": 1,
+         "exp": "«أَحْسَنَ الْقَصَصِ» (يوسف: ٣)."},
+        {"q": "من القائل: «يَا بُنَيَّ لَا تَقْصُصْ رُؤْيَاكَ عَلَىٰ إِخْوَتِكَ»؟",
+         "opts": ["يوسف", "يعقوب (والده)", "أحد إخوته", "عزيز مصر"], "ans": 1,
+         "exp": "قالها يعقوب عليه السلام لابنه."},
+        {"q": "أكمل: «تَنزِيلَ الْعَزِيزِ ...»",
+         "opts": ["الْحَكِيمِ", "الرَّحِيمِ", "الْعَلِيمِ", "الْكَرِيمِ"], "ans": 1,
+         "exp": "«تَنزِيلَ الْعَزِيزِ الرَّحِيمِ» (يس: ٥)."},
+        {"q": "«يس» من أي نوع من فواتح السور؟",
+         "opts": ["أسماء", "الحروف المقطّعة", "أفعال", "أدوات"], "ans": 1,
+         "exp": "من الحروف المقطّعة في فواتح السور."},
+        {"q": "ما رقم سورة يس في المصحف الشريف؟",
+         "opts": ["٣٥", "٣٦", "٣٧", "٣٨"], "ans": 1, "exp": "سورة يس رقم ٣٦."},
+        {"q": "أكمل: «إِنَّا أَنزَلْنَاهُ قُرْآنًا عَرَبِيًّا لَّعَلَّكُمْ ...»",
+         "opts": ["تَذَكَّرُونَ", "تَعْقِلُونَ", "تُفْلِحُونَ", "تَشْكُرُونَ"], "ans": 1,
+         "exp": "«لَّعَلَّكُمْ تَعْقِلُونَ» (يوسف: ٢)."},
+        {"q": "وُصِف الشيطان في خاتمة آيات يوسف بأنه للإنسان؟",
+         "opts": ["عَدُوٌّ مُّبِينٌ", "خَصْمٌ لَدُودٌ", "وَلِيٌّ حَمِيمٌ", "قَرِينٌ"], "ans": 0,
+         "exp": "«إِنَّ الشَّيْطَانَ لِلْإِنسَانِ عَدُوٌّ مُّبِينٌ»."},
+        {"q": "أكمل: «وَإِن كُنتَ مِن قَبْلِهِ لَمِنَ ...»",
+         "opts": ["الْغَافِلِينَ", "الْخَاسِرِينَ", "النَّادِمِينَ", "الْجَاهِلِينَ"], "ans": 0,
+         "exp": "«لَمِنَ الْغَافِلِينَ» (يوسف: ٣)."},
+    ],
+    "adab": [
+        {"q": "قصيدة «قارئة الفنجان» لأي شاعر؟",
+         "opts": ["أحمد مطر", "نزار قباني", "بدر شاكر السياب", "عبد الرزاق عبد الواحد"],
+         "ans": 1, "exp": "للشاعر السوري نزار قباني."},
+        {"q": "«الزائر الأخير» من شعر؟",
+         "opts": ["عبد الرزاق عبد الواحد", "نزار قباني", "السياب", "أحمد مطر"], "ans": 0,
+         "exp": "للشاعر العراقي عبد الرزاق عبد الواحد."},
+        {"q": "«رسالة إلى يزيد» لأي شاعر؟",
+         "opts": ["نزار قباني", "بدر شاكر السياب", "أحمد مطر", "عبد الرزاق عبد الواحد"],
+         "ans": 1, "exp": "للشاعر العراقي بدر شاكر السياب."},
+        {"q": "«اعتذار (فوق نعلي)» لأي شاعر؟",
+         "opts": ["أحمد مطر", "نزار قباني", "السياب", "المتنبي"], "ans": 0,
+         "exp": "للشاعر العراقي أحمد مطر."},
+        {"q": "أي شاعر له قصيدتان ضمن الملزمة؟",
+         "opts": ["السياب", "أحمد مطر", "نزار قباني", "عبد الرزاق عبد الواحد"], "ans": 2,
+         "exp": "نزار قباني: «أين أذهب» و«قارئة الفنجان»."},
+        {"q": "بدر شاكر السياب يُعدّ من رواد؟",
+         "opts": ["الشعر العمودي", "الشعر الحر (التفعيلة)", "الموشحات", "شعر المعلقات"],
+         "ans": 1, "exp": "من رواد الشعر الحر (شعر التفعيلة)."},
+        {"q": "أيّ قصيدة في الملزمة غنّاها الفنان عبد الحليم حافظ؟",
+         "opts": ["أين أذهب", "الزائر الأخير", "قارئة الفنجان", "رسالة إلى يزيد"], "ans": 2,
+         "exp": "«قارئة الفنجان» لنزار قباني."},
+        {"q": "قصيدة «أين أذهب» لأي شاعر؟",
+         "opts": ["نزار قباني", "أحمد مطر", "السياب", "عبد الرزاق عبد الواحد"], "ans": 0,
+         "exp": "للشاعر نزار قباني."},
+        {"q": "ما جنسية الشاعر نزار قباني؟",
+         "opts": ["عراقي", "سوري", "مصري", "لبناني"], "ans": 1, "exp": "شاعر سوري."},
+        {"q": "الشاعر المعروف بقصائده الساخرة القصيرة «اللافتات»؟",
+         "opts": ["السياب", "أحمد مطر", "نزار قباني", "عبد الرزاق عبد الواحد"], "ans": 1,
+         "exp": "أحمد مطر صاحب «اللافتات»."},
+        {"q": "عبد الرزاق عبد الواحد شاعر؟",
+         "opts": ["مصري", "سوري", "عراقي", "سعودي"], "ans": 2, "exp": "شاعر عراقي بارز."},
+        {"q": "في أي عام تُوفّي بدر شاكر السياب؟",
+         "opts": ["١٩٥٤", "١٩٦٤", "١٩٧٤", "١٩٨٤"], "ans": 1, "exp": "تُوفّي عام ١٩٦٤."},
+    ],
+    "qawaid": [
+        {"q": "«نجحَ الطالبُ» — ما إعراب «الطالبُ»؟",
+         "opts": ["مفعول به", "فاعل مرفوع", "حال", "مبتدأ"], "ans": 1,
+         "exp": "فاعل مرفوع وعلامة رفعه الضمة."},
+        {"q": "«قرأَ محمدٌ الكتابَ» — ما إعراب «الكتابَ»؟",
+         "opts": ["فاعل", "مفعول مطلق", "مفعول به منصوب", "حال"], "ans": 2,
+         "exp": "مفعول به منصوب وعلامة نصبه الفتحة."},
+        {"q": "مصدرٌ منصوب يُذكر بعد فعلٍ من لفظه لتوكيده، هو؟",
+         "opts": ["الحال", "المفعول المطلق", "المفعول به", "الفاعل"], "ans": 1,
+         "exp": "المفعول المطلق، مثل: فرحَ فرحًا."},
+        {"q": "«عادَ الجنديُّ منتصرًا» — ما إعراب «منتصرًا»؟",
+         "opts": ["مفعول به", "حال منصوب", "فاعل", "مفعول مطلق"], "ans": 1,
+         "exp": "حال منصوب يبيّن هيئة الفاعل."},
+        {"q": "«فرِحَ الطفلُ فرحًا» — ما إعراب «فرحًا»؟",
+         "opts": ["مفعول مطلق", "حال", "مفعول به", "تمييز"], "ans": 0,
+         "exp": "مفعول مطلق (للتوكيد) منصوب."},
+        {"q": "الفعل «اُكْتُبْ» نوعه؟",
+         "opts": ["ماضٍ", "مضارع", "أمر", "مصدر"], "ans": 2, "exp": "فعل أمر مبنيٌّ على السكون."},
+        {"q": "علامة نصب المفعول به في «شربتُ الماءَ»؟",
+         "opts": ["الضمة", "الكسرة", "الفتحة", "السكون"], "ans": 2, "exp": "ينصب بالفتحة."},
+        {"q": "الحال يأتي غالبًا...؟",
+         "opts": ["معرفة وصاحبه نكرة", "نكرة وصاحبه معرفة",
+                  "معرفة وصاحبه معرفة", "نكرة وصاحبه نكرة"], "ans": 1,
+         "exp": "الحال نكرة وصاحبه معرفة غالبًا."},
+        {"q": "الفعل كلمةٌ تدلُّ على؟",
+         "opts": ["ذاتٍ فقط", "حدثٍ مقترنٍ بزمن", "صفةٍ ثابتة", "مكان"], "ans": 1,
+         "exp": "حدثٌ مقترنٌ بزمن (ماضٍ/مضارع/أمر)."},
+        {"q": "أيٌّ مما يلي ليس من أنواع الفعل الثلاثة؟",
+         "opts": ["الماضي", "المضارع", "الأمر", "المصدر"], "ans": 3,
+         "exp": "المصدر اسمٌ وليس فعلًا."},
+        {"q": "«دُرتُ دورتين» — المفعول المطلق «دورتين» جاء لبيان؟",
+         "opts": ["التوكيد", "النوع", "العدد", "الزمان"], "ans": 2, "exp": "لبيان العدد."},
+        {"q": "«سارَ سيرًا حثيثًا» — المفعول المطلق جاء لبيان؟",
+         "opts": ["العدد", "النوع", "التوكيد", "المكان"], "ans": 1, "exp": "لبيان النوع."},
+        {"q": "الفعل «يكتبُ» نوعه؟",
+         "opts": ["ماضٍ", "مضارع", "أمر", "مصدر"], "ans": 1, "exp": "فعل مضارع مرفوع."},
+    ],
+    "imla": [
+        {"q": "أي علامة تُوضع بين جملتين الثانية سببٌ/نتيجة للأولى؟",
+         "opts": ["الفاصلة (،)", "الفاصلة المنقوطة (؛)", "النقطتان (:)", "الشرطة (—)"],
+         "ans": 1, "exp": "الفاصلة المنقوطة، مثل: اجتهدَ؛ فنجحَ."},
+        {"q": "النقطتان (:) تُستعملان قبل؟",
+         "opts": ["نهاية الجملة", "القول المنقول والتعداد", "السؤال", "التعجّب"], "ans": 1,
+         "exp": "قبل القول المنقول والتعداد والتفسير."},
+        {"q": "أيّهما الصواب في المكاتبات الرسمية؟",
+         "opts": ["إلحاقًا بكتابكم", "لاحقًا لكتابكم", "الاثنان صواب", "لا شيء"], "ans": 1,
+         "exp": "«لاحقًا» تعني تابعًا، وهو المقصود."},
+        {"q": "أيّهما الصواب؟",
+         "opts": ["على ضوء المذكرة", "في ضوء المذكرة", "الاثنان", "حول ضوء المذكرة"],
+         "ans": 1, "exp": "«في ضوء» أنسب للسياق المجازي."},
+        {"q": "«المذكور أعلاه» يُستبدل بالأصحّ بـ؟",
+         "opts": ["المذكور آنفًا", "المذكور تحته", "المذكور خلفه", "لا تغيير"], "ans": 0,
+         "exp": "«آنفًا» تعني ما سبق ذكره."},
+        {"q": "ما علامة الترقيم المناسبة بعد «ما أجملَ السماءَ»؟",
+         "opts": ["نقطة (.)", "علامة استفهام (؟)", "علامة تعجّب (!)", "فاصلة (،)"], "ans": 2,
+         "exp": "علامة التأثّر/التعجّب (!)."},
+        {"q": "الأقواس المزخرفة ﴿ ﴾ تُستعمل لحصر؟",
+         "opts": ["الحوار", "الآيات القرآنية", "الكلام المعترض", "العناوين"], "ans": 1,
+         "exp": "تُحصر بها الآيات القرآنية."},
+        {"q": "النقطة (.) تُوضع في؟",
+         "opts": ["وسط الجملة", "نهاية الجملة التامّة المعنى", "بعد السؤال", "قبل التعداد"],
+         "ans": 1, "exp": "في نهاية الجملة التامّة."},
+        {"q": "علامة الاستفهام (؟) تُوضع بعد؟",
+         "opts": ["الجملة الخبرية", "الجملة الاستفهامية", "التعجّب", "القول المنقول"],
+         "ans": 1, "exp": "بعد الجملة الاستفهامية."},
+        {"q": "علامتا التنصيص « » تُستعملان لـ؟",
+         "opts": ["حصر الكلام المنقول بنصّه", "التعجّب", "التعداد", "الحذف"], "ans": 0,
+         "exp": "لحصر الكلام المنقول بنصّه دون تغيير."},
+        {"q": "القوسان المعقوفان [ ] يُستعملان لـ؟",
+         "opts": ["الآيات", "ما يضيفه الناقل إلى النص الأصلي", "الحوار", "السؤال"], "ans": 1,
+         "exp": "لما يضيفه الناقل من عنده إلى النص."},
+        {"q": "سبب خطأ بدء الخطاب بـ«كتابكم...» مباشرةً؟",
+         "opts": ["مبتدأ لا خبر له", "فعل ناقص", "حال غير منصوب", "لا خطأ فيه"], "ans": 0,
+         "exp": "يصبح مبتدأ بلا خبر؛ والصواب: «إشارةً إلى كتابكم»."},
+        {"q": "الشرطة (—) في الحوار تدلُّ على؟",
+         "opts": ["نهاية الكلام", "المتكلّم", "السؤال", "التعجّب"], "ans": 1,
+         "exp": "تدلُّ على المتكلّم في الحوار، وتُستعمل أيضًا بين العدد والمعدود."},
+    ],
+}
+
+SECTION_NAMES = {"quran": "القرآن الكريم", "adab": "الأدب",
+                 "qawaid": "القواعد", "imla": "الإملاء"}
+LETTERS = ["أ", "ب", "ج", "د"]
+
+
+# ============================================================
+#                       لوحة الصدارة
+# ============================================================
+def load_board() -> dict:
+    try:
+        with open(LEADERBOARD_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_board(board: dict) -> None:
+    with open(LEADERBOARD_FILE, "w", encoding="utf-8") as f:
+        json.dump(board, f, ensure_ascii=False, indent=2)
+
+
+def update_board(board: dict, user_id, name: str, score: int, total: int) -> bool:
+    """يحدّث أفضل نتيجة للمستخدم. يعيد True إذا كانت نتيجةً قياسيةً جديدة."""
+    pct = round(score / total * 100)
+    uid = str(user_id)
+    prev = board.get(uid)
+    if prev is None or pct > prev["pct"] or (pct == prev["pct"] and score > prev["score"]):
+        board[uid] = {"name": name, "score": score, "total": total, "pct": pct}
+        return True
+    board[uid]["name"] = name  # حدّث الاسم فقط
+    return False
+
+
+def board_ranking(board: dict):
+    return sorted(board.items(),
+                  key=lambda kv: (kv[1]["pct"], kv[1]["score"]), reverse=True)
+
+
+def board_text(board: dict, highlight_uid: str = None) -> str:
+    ranking = board_ranking(board)
+    if not ranking:
+        return ("🏆 <b>لوحة الصدارة</b>\n\n"
+                "لا توجد نتائج بعد — كن أول المتصدّرين بإكمال «الاختبار الشامل»!")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 <b>لوحة الصدارة — أفضل النتائج</b>\n"]
+    shown = [u for u, _ in ranking[:TOP_N]]
+    for i, (uid, e) in enumerate(ranking[:TOP_N]):
+        rank = medals[i] if i < 3 else f"{i + 1}."
+        star = " 👈" if uid == highlight_uid else ""
+        lines.append(f"{rank} {e['name']} — {e['pct']}% ({e['score']}/{e['total']}){star}")
+    if highlight_uid and highlight_uid not in shown:
+        for i, (uid, e) in enumerate(ranking):
+            if uid == highlight_uid:
+                lines.append(f"\nترتيبك: {i + 1}. {e['name']} — "
+                             f"{e['pct']}% ({e['score']}/{e['total']})")
+                break
+    return "\n".join(lines)
+
+
+# ============================================================
+#                       الواجهة
+# ============================================================
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 اختبار شامل (كل الملزمة)", callback_data="m|all")],
+        [InlineKeyboardButton("🕌 القرآن", callback_data="m|quran"),
+         InlineKeyboardButton("📜 الأدب", callback_data="m|adab")],
+        [InlineKeyboardButton("📝 القواعد", callback_data="m|qawaid"),
+         InlineKeyboardButton("✒️ الإملاء", callback_data="m|imla")],
+        [InlineKeyboardButton("🏆 لوحة الصدارة", callback_data="board")],
+    ])
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "🌿 <b>مرحبًا بك في اختبار ملزمة اللغة العربية</b>\n"
+        "<i>إعداد الطالب: باسم عصيد كمر</i>\n\n"
+        f"اختبارٌ تفاعلي يغطّي الملزمة كاملةً، لكل سؤال ⏱️ <b>{TIME_LIMIT} ثانية</b>، "
+        "مع تصحيحٍ فوري وشرحٍ لكل إجابة ولوحة صدارةٍ بين الزملاء.\n\n"
+        "اختر نوع الاختبار للبدء 👇"
+    )
+    target = update.message or update.callback_query.message
+    await target.reply_text(text, reply_markup=main_menu(), parse_mode=ParseMode.HTML)
+
+
+def build_quiz(section: str):
+    if section == "all":
+        items = [dict(q, _sec=sec) for sec, qs in QUESTIONS.items() for q in qs]
+    else:
+        items = [dict(q, _sec=section) for q in QUESTIONS[section]]
+    random.shuffle(items)
+    return items
+
+
+async def send_question(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    ud = context.user_data
+    quiz, idx = ud["quiz"], ud["idx"]
+    q = quiz[idx]
+    header = (f"السؤال {idx + 1} من {len(quiz)} — "
+              f"<b>{SECTION_NAMES[q['_sec']]}</b>  ⏱️ {TIME_LIMIT}ث")
+    kb = [[InlineKeyboardButton(f"{LETTERS[i]}) {opt}", callback_data=f"a|{idx}|{i}")]
+          for i, opt in enumerate(q["opts"])]
+    msg = await context.bot.send_message(
+        chat_id, f"{header}\n\n❓ {q['q']}",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+    ud["q_msg_id"] = msg.message_id
+    ud["cur_done"] = False
+    ud["timer_task"] = asyncio.create_task(question_timer(context, chat_id, idx))
+
+
+async def question_timer(context: ContextTypes.DEFAULT_TYPE, chat_id: int, idx: int) -> None:
+    """ينتظر مدة السؤال؛ فإن لم يُجب الطالب احتُسب فوات الوقت."""
+    try:
+        await asyncio.sleep(TIME_LIMIT)
+    except asyncio.CancelledError:
+        return
+    ud = context.user_data
+    if ud.get("cur_done") or ud.get("idx") != idx:
+        return
+    ud["cur_done"] = True
+    q = ud["quiz"][idx]
+    c = q["ans"]
+    text = (f"❓ {q['q']}\n\n"
+            f"⏱️ <b>انتهى الوقت!</b>\n"
+            f"الصواب: <b>{LETTERS[c]}) {q['opts'][c]}</b>\n"
+            f"💡 {q['exp']}")
+    try:
+        await context.bot.edit_message_text(text, chat_id=chat_id,
+                                            message_id=ud["q_msg_id"],
+                                            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    await advance(context, chat_id)
+
+
+async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    section = query.data.split("|", 1)[1]
+    u = update.effective_user
+    context.user_data.update(
+        quiz=build_quiz(section), idx=0, score=0, section=section,
+        uid=u.id, name=(u.full_name or u.username or "طالب"),
+    )
+    title = "الاختبار الشامل" if section == "all" else SECTION_NAMES[section]
+    await query.edit_message_text(f"✅ بدأنا: <b>{title}</b>\nبالتوفيق! 🍀",
+                                  parse_mode=ParseMode.HTML)
+    await send_question(context, query.message.chat_id)
+
+
+async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    ud = context.user_data
+    if "quiz" not in ud:
+        await query.answer("ابدأ اختبارًا جديدًا عبر /start", show_alert=True)
+        return
+    _, qidx, choice = query.data.split("|")
+    qidx, choice = int(qidx), int(choice)
+    if qidx != ud["idx"] or ud.get("cur_done"):
+        await query.answer("هذا السؤال انتهى — تابع السؤال الحالي.")
+        return
+    ud["cur_done"] = True                       # قفل السؤال (يمنع الازدواج)
+    task = ud.get("timer_task")
+    if task:
+        task.cancel()
+    await query.answer()
+
+    q = ud["quiz"][qidx]
+    c = q["ans"]
+    if choice == c:
+        ud["score"] += 1
+        verdict = "✅ <b>إجابة صحيحة!</b>"
+    else:
+        verdict = f"❌ <b>إجابة غير صحيحة.</b>\nالصواب: <b>{LETTERS[c]}) {q['opts'][c]}</b>"
+    await query.edit_message_text(
+        f"❓ {q['q']}\n\nإجابتك: {LETTERS[choice]}) {q['opts'][choice]}\n"
+        f"{verdict}\n💡 {q['exp']}",
+        parse_mode=ParseMode.HTML)
+    await advance(context, query.message.chat_id)
+
+
+async def advance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    ud = context.user_data
+    ud["idx"] += 1
+    if ud["idx"] < len(ud["quiz"]):
+        await send_question(context, chat_id)
+    else:
+        await finish(context, chat_id)
+
+
+async def finish(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    ud = context.user_data
+    score, total = ud["score"], len(ud["quiz"])
+    pct = round(score / total * 100)
+    if pct == 100:
+        note, emoji = "ممتاز! علامة كاملة 🏆", "🌟"
+    elif pct >= 75:
+        note, emoji = "جيد جدًّا، استمر!", "👏"
+    elif pct >= 50:
+        note, emoji = "جيد، وتحتاج مراجعةً بسيطة.", "📖"
+    else:
+        note, emoji = "راجع الملزمة جيدًا ثم أعد المحاولة.", "💪"
+
+    record_line = ""
+    # تُسجَّل النتائج في الصدارة للاختبار الشامل فقط
+    if ud.get("section") == "all":
+        board = context.bot_data.setdefault("board", load_board())
+        is_pb = update_board(board, ud.get("uid", chat_id),
+                             ud.get("name", "طالب"), score, total)
+        save_board(board)
+        record_line = ("\n🎉 رقم قياسي جديد لك في الصدارة!" if is_pb
+                       else "\nسُجّلت محاولتك (لم تتجاوز أفضل نتيجة سابقة لك).")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 اختبار جديد", callback_data="restart")],
+        [InlineKeyboardButton("🏆 لوحة الصدارة", callback_data="board")],
+    ])
+    await context.bot.send_message(
+        chat_id,
+        f"{emoji} <b>انتهى الاختبار</b>\n\n"
+        f"نتيجتك: <b>{score} / {total}</b>  ({pct}%)\n{note}{record_line}",
+        reply_markup=kb, parse_mode=ParseMode.HTML)
+    for k in ("quiz", "idx", "score", "cur_done", "timer_task", "q_msg_id", "section"):
+        ud.pop(k, None)
+
+
+async def show_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    board = context.bot_data.setdefault("board", load_board())
+    uid = str(update.effective_user.id)
+    text = board_text(board, highlight_uid=uid)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ القائمة", callback_data="home")]])
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, reply_markup=kb,
+                                                       parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
+async def on_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()
+    await start(update, context)
+
+
+async def on_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()
+    await start(update, context)
+
+
+def main() -> None:
+    if BOT_TOKEN == "ضع_توكن_البوت_هنا":
+        raise SystemExit("⚠️ ضع توكن البوت في BOT_TOKEN أو في متغيّر البيئة قبل التشغيل.")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.bot_data["board"] = load_board()
+    app.add_handler(CommandHandler(["start", "quiz"], start))
+    app.add_handler(CommandHandler("leaderboard", show_board))
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^m\|"))
+    app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^a\|"))
+    app.add_handler(CallbackQueryHandler(show_board, pattern=r"^board$"))
+    app.add_handler(CallbackQueryHandler(on_restart, pattern=r"^restart$"))
+    app.add_handler(CallbackQueryHandler(on_home, pattern=r"^home$"))
+    print(f"✅ البوت يعمل الآن (⏱️ {TIME_LIMIT}ث لكل سؤال)... اضغط Ctrl+C للإيقاف.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
